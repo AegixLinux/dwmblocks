@@ -7,10 +7,10 @@ Modular status bar for dwm written in c.
 The statusbar is made from text output from commandline programs. 
 Blocks are added and removed by editing the config.h file.
 
-# TANKLINUX build
+# Aegix build
 
 dwmblocks reads preexisting scripts from ~/.local/bin/statusbar.
-So if you want this build outside of TANKLINUX, download those and put them in your
+So if you want this build outside of Aegix, download those and put them in your
 `$PATH` to avoid redundancy in statusbar scripts.
 
 # Signaling changes
