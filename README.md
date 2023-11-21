@@ -4,7 +4,7 @@ Modular status bar for dwm written in c.
 
 # Modifying blocks
 
-The statusbar is made from text output from commandline programs. 
+The statusbar is made from text output from commandline programs.
 Blocks are added and removed by editing the config.h file.
 
 # Aegix build
@@ -16,7 +16,7 @@ So if you want this build outside of Aegix, download those and put them in your
 # Signaling changes
 
 Most statusbars constantly rerun every script every several seconds to update.
-This is an option here, but a superior choice is giving your module a signal 
+This is an option here, but a superior choice is giving your module a signal
 that you can signal to it to update on a relevant event, rather than having it
 rerun idly.
 
@@ -36,6 +36,8 @@ Note that all modules must have different signal numbers.
 Like i3blocks, this build allows you to build in additional actions into your
 scripts in response to click events.  See the above linked scripts for examples
 of this using the `$BLOCK_BUTTON` variable.
+This allows us to increase/decrease screen brightness by hovering over the
+battery indicator and scrolling up or down.
 
 For this feature to work, you need the appropriate patch in dwm as well. See
 [here](https://dwm.suckless.org/patches/statuscmd/).
