@@ -172,12 +172,17 @@ int getstatus(char *str, char *last)
 {
 	strcpy(last, str);
 	str[0] = '\0';
+	// Add leading separator for center section
+	if (center_delim_after >= 0)
+		strcat(str, "│ ");
     for(int i = 0; i < LENGTH(blocks); i++) {
 		strcat(str, statusbar[i]);
+		// Insert center delimiter after specified block (delim already added by getcmd)
+		if (center_delim_after >= 0 && i == center_delim_after)
+			strcat(str, ";;│ ");
         if (i == LENGTH(blocks) - 1)
-            strcat(str, " ");
+            strcat(str, "│");  // trailing separator
     }
-	str[strlen(str)-1] = '\0';
 	return strcmp(str, last);//0 if they are the same
 }
 
