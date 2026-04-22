@@ -42,3 +42,5 @@ battery indicator and scrolling up or down.
 For this feature to work, you need the appropriate patch in dwm as well. See
 [here](https://dwm.suckless.org/patches/statuscmd/).
 Credit for those patches goes to Daniel Bylinka (daniel.bylinka@gmail.com).
+
+<!-- local-only smoke: 2026-04-22T18:01:06Z -->
