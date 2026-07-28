@@ -24,6 +24,9 @@ void getcmds(int time);
 void getsigcmds(int signal);
 void setupsignals();
 void sighandler(int signum);
+void drainsignals();
+#else
+#define drainsignals() ((void)0)
 #endif
 int getstatus(char *str, char *last);
 void setroot();
@@ -40,6 +43,29 @@ static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
 static char statusstr[2][256];
 static int statusContinue = 1;
 static void (*writestatus) () = setroot;
+
+#ifndef __OpenBSD__
+/* Signal handlers must not do the work themselves.
+ *
+ * getcmd() calls popen()/fgets()/pclose() and setroot() calls into Xlib; none
+ * of those are async-signal-safe. Doing them inside a handler means that when a
+ * signal lands while the main loop is already inside one of them, the handler
+ * re-enters it on the same thread and blocks on a non-recursive glibc/libX11
+ * mutex that only that -- now blocked -- thread could release. The bar then
+ * hangs forever, frozen at whatever it last displayed, parked in futex_do_wait
+ * with the nested signals stuck in SigBlk.
+ *
+ * So the handler now only records which signals arrived, and statusloop() does
+ * the real work from normal context. Writing a volatile sig_atomic_t is the one
+ * thing a handler may always safely do.
+ *
+ * Indexed by (signum - SIGRTMIN). Fixed size because SIGRTMIN/SIGRTMAX are not
+ * compile-time constants on glibc; block signals are single/double digit, and
+ * out-of-range values are simply ignored. */
+#define MAXSIGSLOTS 64
+static volatile sig_atomic_t sigpending_slot[MAXSIGSLOTS];
+static volatile sig_atomic_t sigpending_any;
+#endif
 
 void replace(char *str, char old, char new)
 {
@@ -144,15 +170,30 @@ void getsigcmds(int signal)
 void setupsignals()
 {
 	struct sigaction sa;
+	struct sigaction block_sa;
 
 	for(int i = SIGRTMIN; i <= SIGRTMAX; i++)
 		signal(i, SIG_IGN);
+
+	/* Installed without SA_RESTART on purpose. signal(3) would set it, and a
+	 * restarted nanosleep(2) would resume for its remaining time without ever
+	 * returning to the loop -- so a flagged update could sit unhandled for up
+	 * to one interval. Letting nanosleep fail with EINTR wakes statusloop()
+	 * immediately, which is what keeps signal-driven blocks feeling instant
+	 * now that the handler no longer refreshes them itself. */
+	memset(&block_sa, 0, sizeof(block_sa));
+	block_sa.sa_handler = sighandler;
+	sigemptyset(&block_sa.sa_mask);
+	block_sa.sa_flags = 0;
+
+	memset(&sa, 0, sizeof(sa));
+	sigemptyset(&sa.sa_mask);
 
 	for(int i = 0; i < LENGTH(blocks); i++)
 	{
 		if (blocks[i].signal > 0)
 		{
-			signal(SIGRTMIN+blocks[i].signal, sighandler);
+			sigaction(SIGRTMIN+blocks[i].signal, &block_sa, NULL);
 			sigaddset(&sa.sa_mask, SIGRTMIN+blocks[i].signal);
 		}
 	}
@@ -186,18 +227,20 @@ int getstatus(char *str, char *last)
 	return strcmp(str, last);//0 if they are the same
 }
 
+/* Opened once in main() and reused for the life of the process.
+ *
+ * This used to XOpenDisplay()/XCloseDisplay() on every single update, which
+ * meant the process sat inside Xlib's connection setup -- holding libX11's
+ * global lock -- several times a second, widening the window for the
+ * re-entrancy hang described above. It was also unsound on its own terms: when
+ * XOpenDisplay() failed it left dpy pointing at the display it had just closed
+ * and used it anyway, then closed it a second time. */
 void setroot()
 {
 	if (!getstatus(statusstr[0], statusstr[1]))//Only set root if text has changed.
 		return;
-	Display *d = XOpenDisplay(NULL);
-	if (d) {
-		dpy = d;
-	}
-	screen = DefaultScreen(dpy);
-	root = RootWindow(dpy, screen);
 	XStoreName(dpy, root, statusstr[0]);
-	XCloseDisplay(dpy);
+	XFlush(dpy);
 }
 
 void pstdout()
@@ -231,11 +274,13 @@ void statusloop()
 	{
         // sleep for tosleep (should be a sleeptime of interval seconds) and put what was left if interrupted back into tosleep
         interrupted = nanosleep(&tosleep, &tosleep);
-        // if interrupted then just go sleep again for the remaining time
+        // if interrupted then service whatever signal woke us, then sleep out the remainder
         if(interrupted == -1){
+            drainsignals();
             continue;
         }
         // if not interrupted then do the calling and writing
+        drainsignals();
         getcmds(i);
         writestatus();
         // then increment since its actually been a second (plus the time it took the commands to run)
@@ -246,10 +291,40 @@ void statusloop()
 }
 
 #ifndef __OpenBSD__
+/* Async-signal-safe: records the signal and returns. All refreshing happens in
+ * drainsignals(), called from statusloop(). See the comment on
+ * sigpending_slot[] for why doing the work here deadlocks. */
 void sighandler(int signum)
 {
-	getsigcmds(signum-SIGRTMIN);
-	writestatus();
+	int slot = signum - SIGRTMIN;
+
+	if (slot >= 0 && slot < MAXSIGSLOTS)
+		sigpending_slot[slot] = 1;
+	sigpending_any = 1;
+}
+
+/* Runs the blocks flagged by sighandler(), from normal context. */
+void drainsignals()
+{
+	int updated = 0;
+
+	if (!sigpending_any)
+		return;
+	sigpending_any = 0;
+
+	for (int slot = 0; slot < MAXSIGSLOTS; slot++)
+	{
+		if (!sigpending_slot[slot])
+			continue;
+		/* Cleared before the refresh, so a signal arriving during it is
+		 * kept rather than lost. */
+		sigpending_slot[slot] = 0;
+		getsigcmds(slot);
+		updated = 1;
+	}
+
+	if (updated)
+		writestatus();
 }
 
 void buttonhandler(int sig, siginfo_t *si, void *ucontext)
@@ -278,10 +353,14 @@ void buttonhandler(int sig, siginfo_t *si, void *ucontext)
 
 #endif
 
+/* _exit(2), not exit(3): exit() runs atexit handlers and flushes stdio, neither
+ * of which is async-signal-safe, so a SIGTERM arriving mid-popen could wedge the
+ * process on the way out for the same reason the status updates used to. Nothing
+ * here needs flushing -- pstdout() already fflush()es each line. */
 void termhandler(int signum)
 {
 	statusContinue = 0;
-	exit(0);
+	_exit(0);
 }
 
 int main(int argc, char** argv)
@@ -293,7 +372,23 @@ int main(int argc, char** argv)
 		else if(!strcmp("-p",argv[i]))
 			writestatus = pstdout;
 	}
+	/* Only the X writer needs a display; -p just prints to stdout, and should
+	 * still work with no X server around. */
+	if (writestatus == setroot)
+	{
+		dpy = XOpenDisplay(NULL);
+		if (!dpy)
+		{
+			fprintf(stderr, "dwmblocks: cannot open display\n");
+			return 1;
+		}
+		screen = DefaultScreen(dpy);
+		root = RootWindow(dpy, screen);
+	}
 	signal(SIGTERM, termhandler);
 	signal(SIGINT, termhandler);
 	statusloop();
+	if (dpy)
+		XCloseDisplay(dpy);
+	return 0;
 }
